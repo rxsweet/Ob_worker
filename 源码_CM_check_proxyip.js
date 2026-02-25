@@ -1,4 +1,5 @@
 //修改了第14行
+//修改了185行的函数，使用了google,1.1.1.1，等3个查询网站
 import { connect } from "cloudflare:sockets";
 let 临时TOKEN, 永久TOKEN;
 export default {
@@ -181,51 +182,72 @@ export default {
   }
 };
 
-// 新增域名解析函数
+// 新增域名解析函数（带 fallback）
 async function resolveDomain(domain) {
   domain = domain.includes(':') ? domain.split(':')[0] : domain;
-  try {
-    // 并发请求IPv4和IPv6记录
-    const [ipv4Response, ipv6Response] = await Promise.all([
-      fetch(`https://1.1.1.1/dns-query?name=${domain}&type=A`, {
-        headers: { 'Accept': 'application/dns-json' }
-      }),
-      fetch(`https://1.1.1.1/dns-query?name=${domain}&type=AAAA`, {
-        headers: { 'Accept': 'application/dns-json' }
-      })
-    ]);
 
-    const [ipv4Data, ipv6Data] = await Promise.all([
-      ipv4Response.json(),
-      ipv6Response.json()
-    ]);
+  const providers = [
+    { name: "Google", baseUrl: "https://dns.google/resolve" },
+    { name: "Cloudflare", baseUrl: "https://1.1.1.1/dns-query" },
+    { name: "Quad9", baseUrl: "https://dns.quad9.net/dns-query" }
+  ];
 
-    const ips = [];
+  let lastError = null;
 
-    // 添加IPv4地址
-    if (ipv4Data.Answer) {
-      const ipv4Addresses = ipv4Data.Answer
-        .filter(record => record.type === 1) // A记录
-        .map(record => record.data);
-      ips.push(...ipv4Addresses);
+  for (const provider of providers) {
+    try {
+      // 并发请求 A 和 AAAA
+      const [ipv4Response, ipv6Response] = await Promise.all([
+        fetch(`${provider.baseUrl}?name=${domain}&type=A`, {
+          headers: { 'Accept': 'application/dns-json' }
+        }),
+        fetch(`${provider.baseUrl}?name=${domain}&type=AAAA`, {
+          headers: { 'Accept': 'application/dns-json' }
+        })
+      ]);
+
+      if (!ipv4Response.ok || !ipv6Response.ok) {
+        throw new Error(`HTTP error (${ipv4Response.status}/${ipv6Response.status}) from ${provider.name}`);
+      }
+
+      const [ipv4Data, ipv6Data] = await Promise.all([
+        ipv4Response.json(),
+        ipv6Response.json()
+      ]);
+
+      const ips = [];
+
+      // 添加 IPv4 地址
+      if (ipv4Data.Answer) {
+        const ipv4Addresses = ipv4Data.Answer
+          .filter(record => record.type === 1)
+          .map(record => record.data);
+        ips.push(...ipv4Addresses);
+      }
+
+      // 添加 IPv6 地址
+      if (ipv6Data.Answer) {
+        const ipv6Addresses = ipv6Data.Answer
+          .filter(record => record.type === 28)
+          .map(record => `[${record.data}]`);
+        ips.push(...ipv6Addresses);
+      }
+
+      if (ips.length > 0) {
+        return ips;  // 成功拿到至少一个 IP，立即返回
+      }
+
+      // 没有记录也算失败，继续下一个 provider
+      lastError = new Error(`No A or AAAA records from ${provider.name}`);
+
+    } catch (error) {
+      lastError = new Error(`Failed with ${provider.name}: ${error.message}`);
+      // 继续尝试下一个 provider
     }
-
-    // 添加IPv6地址
-    if (ipv6Data.Answer) {
-      const ipv6Addresses = ipv6Data.Answer
-        .filter(record => record.type === 28) // AAAA记录
-        .map(record => `[${record.data}]`); // IPv6地址用方括号包围
-      ips.push(...ipv6Addresses);
-    }
-
-    if (ips.length === 0) {
-      throw new Error('No A or AAAA records found');
-    }
-
-    return ips;
-  } catch (error) {
-    throw new Error(`DNS resolution failed: ${error.message}`);
   }
+
+  // 三个 provider 都失败
+  throw lastError || new Error('All DNS providers failed to resolve domain');
 }
 
 async function CheckProxyIP(proxyIP, colo = 'CF') {
