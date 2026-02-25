@@ -51,7 +51,7 @@ export default {
 async function resolveDomain(domain) {
   domain = domain.includes(':') ? domain.split(':')[0] : domain;
   try {
-    const response = await fetch(`https://1.1.1.1/dns-query?name=${domain}&type=A`, {
+    const response = await fetch(`https://dns.google/resolve?name=${domain}&type=A`, {
       headers: { 'Accept': 'application/dns-json' },
     });
 
