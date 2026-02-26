@@ -1,5 +1,6 @@
 //修改了第14行
 //修改了185行的函数，使用了google,1.1.1.1，等3个查询网站
+
 import { connect } from "cloudflare:sockets";
 let 临时TOKEN, 永久TOKEN;
 export default {
@@ -14,7 +15,7 @@ export default {
     临时TOKEN = await 双重哈希(url.hostname + timestamp + UA);
     //永久TOKEN = env.TOKEN || 临时TOKEN;
     永久TOKEN ='rx';
-
+    
     // 不区分大小写检查路径
     if (path.toLowerCase() === '/check') {
       if (!url.searchParams.has('proxyip')) return new Response('Missing proxyip parameter', { status: 400 });
@@ -52,7 +53,6 @@ export default {
         }
       });
     } else if (path.toLowerCase() === '/resolve') {
-        
       if (!url.searchParams.has('token') || (url.searchParams.get('token') !== 临时TOKEN) && (url.searchParams.get('token') !== 永久TOKEN)) {
         return new Response(JSON.stringify({
           status: "error",
@@ -182,72 +182,52 @@ export default {
   }
 };
 
-// 新增域名解析函数（带 fallback）
+// 新增域名解析函数，解析域名並返回 IP 地址陣列
 async function resolveDomain(domain) {
-  domain = domain.includes(':') ? domain.split(':')[0] : domain;
-
+  // 移除域名中的端口號（如果有，例如 example.com:443 → example.com）
+  domain = domain.split(':')[0];
+  // 定義多個 DoH（DNS over HTTPS）服務提供者，按順序嘗試
   const providers = [
-    { name: "Google", baseUrl: "https://dns.google/resolve" },
-    { name: "Cloudflare", baseUrl: "https://1.1.1.1/dns-query" },
-    { name: "Quad9", baseUrl: "https://dns.quad9.net/dns-query" }
+    {name:"Cloudflare",     url:"https://cloudflare-dns.com/dns-query"},      // Cloudflare 公共 DNS
+    {name:"Google",         url:"https://dns.google/resolve"},               // Google Public DNS
+    {name:"1.1.1.1",        url:"https://1.1.1.1/dns-query"},                // Cloudflare 1.1.1.1
+    {name:"Quad9",          url:"https://dns.quad9.net/dns-query"}            // Quad9 安全 DNS
   ];
-
+  // 用來記錄最後一次發生的錯誤，方便最後統一拋出
   let lastError = null;
-
-  for (const provider of providers) {
+  // 依序嘗試每個 DNS 提供者
+  for (const p of providers) {
     try {
-      // 并发请求 A 和 AAAA
-      const [ipv4Response, ipv6Response] = await Promise.all([
-        fetch(`${provider.baseUrl}?name=${domain}&type=A`, {
-          headers: { 'Accept': 'application/dns-json' }
-        }),
-        fetch(`${provider.baseUrl}?name=${domain}&type=AAAA`, {
-          headers: { 'Accept': 'application/dns-json' }
-        })
+      // 同時發送 A 記錄（IPv4）和 AAAA 記錄（IPv6）的查詢
+      const [d4,d6] = await Promise.all([
+        // 查詢 IPv4 地址 (type=A)
+        fetch(`${p.url}?name=${domain}&type=A`, {headers:{'Accept':'application/dns-json'}}).then(r=>r.json()),
+        // 查詢 IPv6 地址 (type=AAAA)
+        fetch(`${p.url}?name=${domain}&type=AAAA`,{headers:{'Accept':'application/dns-json'}}).then(r=>r.json())
       ]);
-
-      if (!ipv4Response.ok || !ipv6Response.ok) {
-        throw new Error(`HTTP error (${ipv4Response.status}/${ipv6Response.status}) from ${provider.name}`);
-      }
-
-      const [ipv4Data, ipv6Data] = await Promise.all([
-        ipv4Response.json(),
-        ipv6Response.json()
-      ]);
-
-      const ips = [];
-
-      // 添加 IPv4 地址
-      if (ipv4Data.Answer) {
-        const ipv4Addresses = ipv4Data.Answer
-          .filter(record => record.type === 1)
-          .map(record => record.data);
-        ips.push(...ipv4Addresses);
-      }
-
-      // 添加 IPv6 地址
-      if (ipv6Data.Answer) {
-        const ipv6Addresses = ipv6Data.Answer
-          .filter(record => record.type === 28)
-          .map(record => `[${record.data}]`);
-        ips.push(...ipv6Addresses);
-      }
-
-      if (ips.length > 0) {
-        return ips;  // 成功拿到至少一个 IP，立即返回
-      }
-
-      // 没有记录也算失败，继续下一个 provider
-      lastError = new Error(`No A or AAAA records from ${provider.name}`);
-
-    } catch (error) {
-      lastError = new Error(`Failed with ${provider.name}: ${error.message}`);
-      // 继续尝试下一个 provider
+      // 兼容不同提供者的回應格式（有些用 Answer，有些用 answer）
+      const a4 = d4.Answer || d4.answer || [];   // IPv4 記錄陣列
+      const a6 = d6.Answer || d6.answer || [];   // IPv6 記錄陣列
+      // 收集所有找到的 IP 地址
+      //   type=1   → A 記錄（IPv4）
+      //   type=28  → AAAA 記錄（IPv6），並加上方括號方便後續使用
+      const ips = [
+        ...a4.filter(r=>r.type===1).map(r=>r.data),
+        ...a6.filter(r=>r.type===28).map(r=>`[${r.data}]`)
+      ];
+      // 如果有找到任何 IP，就直接回傳（成功結束）
+      if (ips.length) return ips;
+      // 雖然請求成功，但沒有找到任何 A/AAAA 記錄，視為失敗
+      lastError = new Error(`No A/AAAA from ${p.name}`);
+    } catch (e) {
+      // 捕捉到任何錯誤（網路失敗、JSON 解析失敗、timeout 等）
+      lastError = new Error(`Failed ${p.name}: ${e.message}`);
+      // 繼續嘗試下一個提供者
+      continue;
     }
   }
-
-  // 三个 provider 都失败
-  throw lastError || new Error('All DNS providers failed to resolve domain');
+  // 所有提供者都試過了還是失敗 → 拋出最後一次錯誤，或預設錯誤訊息
+  throw lastError || new Error('All DNS providers failed');
 }
 
 async function CheckProxyIP(proxyIP, colo = 'CF') {
@@ -1293,7 +1273,7 @@ async function HTML(hostname, 网站图标) {
       
       <h3 style="color: var(--text-primary); margin: 24px 0 16px;">💡 使用示例</h3>
       <div class="code-block">
-curl "https://${hostname}/check?proxyip=1.2.3.4:443"
+curl "https://cf.090227.xyz/check?proxyip=1.2.3.4:443"
       </div>
 
       <h3 style="color: var(--text-primary); margin: 24px 0 16px;">🔗 响应Json格式</h3>
@@ -1475,16 +1455,33 @@ curl "https://${hostname}/check?proxyip=1.2.3.4:443"
     function preprocessInput(input) {
       if (!input) return input;
       
-      // 去除首尾空格
-      let processed = input.trim();
-      
-      // 检查是否还有空格
-      if (processed.includes(' ')) {
-        // 只保留第一个空格前的内容
-        processed = processed.split(' ')[0];
+      try {
+        // 去除首尾空格
+        let processed = input.trim();
+        
+        // 检查是否还有空格
+        if (processed.includes(' ')) {
+          // 只保留第一个空格前的内容
+          processed = processed.split(' ')[0];
+        }
+        
+        // 提取域名/IP:端口（自动处理URL）
+        // 首先使用正则表达式移除协议部分
+        let noProtocol = processed.replace(/^[a-zA-Z][a-zA-Z0-9+.\\-]*:\\/\\//,'');
+        
+        // 如果没有匹配到协议，再检查是否以//开头
+        if (noProtocol === processed && processed.startsWith('//')) {
+          noProtocol = processed.substring(2);
+        }
+        
+        // 移除路径、查询参数和片段部分（只保留第一个/之前的部分）
+        let extracted = noProtocol.split(/[\\/\\?#]/)[0];
+        
+        return extracted;
+      } catch (e) {
+        console.error('preprocessInput出错:', e);
+        return input.trim();
       }
-      
-      return processed;
     }
     
     // 主检测函数
@@ -1578,7 +1575,7 @@ curl "https://${hostname}/check?proxyip=1.2.3.4:443"
     
     // 检查单个IP
     async function checkSingleIP(proxyip, resultDiv) {
-      const response = await fetch(\`./check?proxyip=\${encodeURIComponent(proxyip)}\`);
+      const response = await fetch(\`https://cf.090227.xyz/check?proxyip=\${encodeURIComponent(proxyip)}\`);
       const data = await response.json();
       
       if (data.success) {
@@ -1822,7 +1819,7 @@ curl "https://${hostname}/check?proxyip=1.2.3.4:443"
     // 检查IP状态
     async function checkIPStatus(ip) {
       try {
-        const response = await fetch(\`./check?proxyip=\${encodeURIComponent(ip)}\`);
+        const response = await fetch(\`https://cf.090227.xyz/check?proxyip=\${encodeURIComponent(ip)}\`);
         const data = await response.json();
         return data;
       } catch (error) {
