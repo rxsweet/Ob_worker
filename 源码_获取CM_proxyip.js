@@ -52,18 +52,10 @@ async function resolveDomainWithFallback(domain) {
   domain = domain.includes(':') ? domain.split(':')[0] : domain;
 
   const providers = [
-    {
-      name: "Google",
-      url: `https://dns.google/resolve?name=${domain}&type=A`
-    },
-    {
-      name: "Cloudflare",
-      url: `https://1.1.1.1/dns-query?name=${domain}&type=A`
-    },
-    {
-      name: "Quad9",
-      url: `https://dns.quad9.net/dns-query?name=${domain}&type=A`
-    }
+    {name: "Cloudflare", url: `https://cloudflare-dns.com/dns-query?name=${domain}&type=A` },
+    {name: "Google", url: `https://dns.google/resolve?name=${domain}&type=A` },
+    {name: "1111", url: `https://1.1.1.1/dns-query?name=${domain}&type=A` },
+    {name: "Quad9", url: `https://dns.quad9.net/dns-query?name=${domain}&type=A` }
   ];
 
   let lastError = null;
